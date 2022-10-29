@@ -1,0 +1,9 @@
+domain: geek7.io
+layout:
+- go.kubebuilder.io/v3
+plugins:
+  manifests.sdk.operatorframework.io/v2: {}
+  scorecard.sdk.operatorframework.io/v2: {}
+projectName: recut
+repo: github.com/geek7-ou/recut
+version: "3"

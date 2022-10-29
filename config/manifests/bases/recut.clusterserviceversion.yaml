@@ -1,0 +1,45 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+  name: recut.v0.0.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions: {}
+  description: Mutating admission webhook to set pod CPU request according to prometheus
+    historical data
+  displayName: recut
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      deployments: null
+    strategy: ""
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - webhook
+  - cpu
+  - request
+  - prometheus
+  links:
+  - name: Recut
+    url: https://recut.domain
+  maintainers:
+  - email: pzelensky@geek7.ee
+    name: Pavel Zelensky
+  maturity: alpha
+  provider:
+    name: geek7
+  version: 0.0.0

@@ -1,0 +1,2 @@
+image: pzelensky/recut:v0.0.1
+serviceMonitor: false

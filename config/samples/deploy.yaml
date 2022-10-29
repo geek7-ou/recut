@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xxx-recut
+  labels:
+    helm.sh/chart: recut-0.1.0
+    app.kubernetes.io/name: recut
+    app.kubernetes.io/instance: xxx
+    app.kubernetes.io/version: "1.16.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: recut
+      app.kubernetes.io/instance: xxx
+  template:
+    metadata:
+      annotations:
+        recut.geek7.io/prom-query: |
+          quantile_over_time(0.80,median by (container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{namespace="recut-dev", cluster="cluster-dev", pod=~"xxx-recut-.*", container!="POD"})[24h[])
+        recut.geek7.io/prom-url: https://vmsingle.geek7.ee
+      labels:
+        app.kubernetes.io/name: recut
+        app.kubernetes.io/instance: xxx
+    spec:
+      serviceAccountName: xxx-recut
+      securityContext:
+        {}
+      containers:
+        - name: recut
+          securityContext:
+            {}
+          image: "nginx:1.16.0"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            {}
