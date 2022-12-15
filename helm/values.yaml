@@ -1,4 +1,11 @@
 env:
   ANNOTATION_DOMAIN: recut.geek7.io
-  CPU_REQUEST_MIN: 100
-  ISTIO_PROXY_CPU_MIN: 5
+  CPU_REQUEST_MIN: "100"
+  ISTIO_PROXY_CPU_MIN: "5"
+  MEMORY_LIMIT_MIN: "1024"
+  ISTIO_MEMORY_LIMIT_MIN: "1024"
+  MEMORY_REQUEST_MIN: "128"
+
+image:
+  registry: pzelensky/recut
+  tag: 0.0.5
