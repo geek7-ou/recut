@@ -9,3 +9,5 @@ env:
 image:
   registry: pzelensky/recut
   tag: 0.0.5
+
+replicas: 1
