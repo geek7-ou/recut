@@ -7,7 +7,6 @@ metadata:
     app.kubernetes.io/component: webhook
     app.kubernetes.io/created-by: recut
     app.kubernetes.io/instance: mutating-webhook-configuration
-    app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: mutatingwebhookconfiguration
     app.kubernetes.io/part-of: recut
   name: recut-mutating-webhook-configuration
@@ -17,7 +16,7 @@ webhooks:
   clientConfig:
     service:
       name: recut-webhook-service
-      namespace: recut
+      namespace: {{.Release.Namespace}}
       path: /recut/v1/pod
   failurePolicy: Ignore
   name: recut-webhook.geek7.io

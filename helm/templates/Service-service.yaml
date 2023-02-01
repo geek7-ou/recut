@@ -5,11 +5,9 @@ metadata:
     app.kubernetes.io/component: webhook
     app.kubernetes.io/created-by: recut
     app.kubernetes.io/instance: webhook-service
-    app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: service
     app.kubernetes.io/part-of: recut
   name: recut-webhook-service
-  namespace: recut
 spec:
   ports:
   - port: 443
