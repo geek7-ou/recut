@@ -45,7 +45,7 @@ spec:
           command:
             - /manager
           envFrom:
-            - secretRef:
+            - configMapRef:
                 name: recut-config
           image: {{.Values.image.registry}}:{{.Values.image.tag}}
           imagePullPolicy: Always

@@ -1,20 +1,24 @@
 package admission
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"strconv"
+	"text/template"
 )
 
 // +kubebuilder:webhook:path=/recut/v1/pod,mutating=true,failurePolicy=Ignore,groups="",resources=pods,verbs=create;update,versions=v1,name=recut-webhook.geek7.io,sideEffects=None,admissionReviewVersions=v1
@@ -22,6 +26,12 @@ import (
 type PodResourceSaver struct {
 	Client  client.Client
 	decoder *admission.Decoder
+}
+
+type QueryParams struct {
+	Namespace string
+	PodRegexp string
+	Period    string
 }
 
 type PromAnswer struct {
@@ -42,7 +52,18 @@ const (
 	DEFAULT_MEMORY_LIMIT_MIN       = 1024
 	DEFAULT_ISTIO_MEMORY_LIMIT_MIN = 256
 	DEFAULT_MEMORY_REQUEST_MIN     = 256
+	DEFAULT_PROM_URL               = "http://vmsingle-vm.monitoring:8429"
+	DEFAULT_PROM_CPU_QUERY         = "median by (container) (rate(container_cpu_usage_seconds_total{namespace=\"{{ .Namespace }}\", pod=~\"{{ .PodRegexp }}\", image!=\"\", container!=\"POD\"}))[{{ .Period }}]"
+	DEFAULT_PROM_MEM_QUERY         = "max(max_over_time(container_memory_working_set_bytes{namespace=\"{{ .Namespace }}\", pod=~\"{{ .PodRegexp }}\", image!=\"\", container!=\"POD\"}[{{ .Period }}])) by (container)"
+	DEFAULT_PERIOD                 = "168h"
 )
+
+/*
+
+median by (container) (rate(container_cpu_usage_seconds_total{namespace="platform-auth-flow-stable", pod=~"auth-flow-service-[0-9a-z]+-[0-9a-z]+", image!="", container!="POD"}))[120h]
+max(max_over_time(container_memory_working_set_bytes{namespace="platform-auth-flow-stable", pod=~"auth-flow-service-[0-9a-z]+-[0-9a-z]+", image!="", container!="POD"}[12h])) by (container)
+
+*/
 
 var (
 	admLog          = ctrl.Log.WithName("recut")
@@ -107,12 +128,49 @@ var (
 		}
 		return DEFAULT_MEMORY_REQUEST_MIN
 	}
+	PROM_URL = func() string {
+		if promUrl := os.Getenv("PROM_URL"); promUrl == "" {
+			admLog.Info("Env var PROM_URL has wrong value or absent. Using predefined value")
+			return DEFAULT_PROM_URL
+		} else {
+			return promUrl
+		}
+	}
+	PROM_CPU_QUERY = func() string {
+		if promCpuQuery := os.Getenv("PROM_CPU_QUERY"); promCpuQuery == "" {
+			admLog.Info("Env var PROM_CPU_QUERY has wrong value or absent. Using predefined value")
+			return DEFAULT_PROM_CPU_QUERY
+		} else {
+			return promCpuQuery
+		}
+	}
+	PROM_MEM_QUERY = func() string {
+		if promMemQuery := os.Getenv("PROM_MEM_QUERY"); promMemQuery == "" {
+			admLog.Info("Env var PROM_MEM_QUERY has wrong value or absent. Using predefined value")
+			return DEFAULT_PROM_MEM_QUERY
+		} else {
+			return promMemQuery
+		}
+	}
+	PERIOD = func() string {
+		if period := os.Getenv("PERIOD"); period == "" {
+			admLog.Info("Env var PERIOD has wrong value or absent. Using predefined value")
+			return DEFAULT_PERIOD
+		} else {
+			return period
+		}
+	}
 )
 
 func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) admission.Response {
 	pod := &v1.Pod{}
 
-	err := v.decoder.Decode(req, pod)
+	//err := v.decoder.Decode(req, pod)
+	err := json.Unmarshal(req.Object.Raw, pod)
+	if os.Getenv("LOG_POD_OBJECT") == "yes" {
+		bbb, _ := json.Marshal(req.Object.Raw)
+		admLog.Info(string(bbb))
+	}
 	if err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
@@ -124,15 +182,21 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 		promUrl  string
 		promQcpu string
 		promQmem string
+		pregexp  string
 	)
-	admLog.Info("Checking annotations ...")
+
+	if pod.OwnerReferences == nil {
+		admLog.Info("No owner reference. Skipping.", "Namespace", pod.Namespace, "Pod", pod.GenerateName)
+		return admission.Allowed("No owner reference. Skipping.")
+	}
+	admLog.Info("Checking annotations ...", "Namespace", pod.Namespace, "Pod", pod.GenerateName)
 	if pod.Annotations[ANNOTATION_DOMAIN()+"/prom-url"] != "" {
 		promUrl = pod.Annotations[ANNOTATION_DOMAIN()+"/prom-url"]
 		admLog.Info("prom-url annotaion")
 
 	} else {
-		admLog.Info("No "+ANNOTATION_DOMAIN()+"/prom-url annotation.", pod.OwnerReferences[0].Kind, pod.OwnerReferences[0].Name)
-		return admission.Allowed("No " + ANNOTATION_DOMAIN() + "/prom-url annotation")
+		admLog.Info("No "+ANNOTATION_DOMAIN()+"/prom-url annotation. Will use default", pod.OwnerReferences[0].Kind, pod.OwnerReferences[0].Name)
+		promUrl = PROM_URL()
 	}
 
 	if pod.Annotations[ANNOTATION_DOMAIN()+"/prom-query"] != "" {
@@ -150,14 +214,55 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 	}
 
 	if (promQmem == "") && (promQcpu == "") {
-		return admission.Allowed("No " + ANNOTATION_DOMAIN() + "/prom-query and " + ANNOTATION_DOMAIN() + "/mem-prom-query annotations found")
+		if def, _ := v.nsIncluded(pod.Namespace, ctx); def == false {
+			return admission.Allowed("No " + ANNOTATION_DOMAIN() + "/prom-query and " + ANNOTATION_DOMAIN() + "/mem-prom-query annotations found. Namespace label absent.")
+		}
+		if pod.OwnerReferences[0].Kind == "Job" {
+			return admission.Allowed("No " + ANNOTATION_DOMAIN() + "/prom-query and " + ANNOTATION_DOMAIN() + "/mem-prom-query annotations found. Namespace label absent.")
+		}
+
+		admLog.Info("No " + ANNOTATION_DOMAIN() + "/prom-query and " + ANNOTATION_DOMAIN() + "/mem-prom-query annotations found. Namespace label present, let's go with defaults.")
+		if pod.OwnerReferences[0].Kind == "ReplicaSet" {
+			pregexp = "^" + regexp.MustCompile(`^([0-9a-z\-]+-)([0-9a-z]+)-$`).
+				ReplaceAllString(pod.GenerateName, "$1") + "[0-9a-z]+-[0-9a-z]+$"
+		}
+		if pod.OwnerReferences[0].Kind == "StatefulSet" {
+			pregexp = "^" + regexp.MustCompile(`^([0-9a-z\-]+-)([0-9]+)$`).
+				ReplaceAllString(pod.Name, "$1") + "[0-9]+$"
+		}
+		qp := QueryParams{
+			Namespace: pod.Namespace,
+			PodRegexp: pregexp,
+			Period:    PERIOD(),
+		}
+		buf := &bytes.Buffer{}
+		cpuQtmpl, err := template.New("cpuQ").Parse(PROM_CPU_QUERY())
+		if err != nil {
+			return admission.Allowed("Badly formed template for prometheus CPU Query")
+		}
+		err = cpuQtmpl.Execute(buf, qp)
+		if err != nil {
+			return admission.Allowed("Badly formed parameters for prometheus CPU Query")
+		}
+		promQcpu = buf.String()
+		buf1 := &bytes.Buffer{}
+		memQtmpl, err := template.New("memQ").Parse(PROM_MEM_QUERY())
+		if err != nil {
+			return admission.Allowed("Badly formed template for prometheus MEM Query")
+		}
+		err = memQtmpl.Execute(buf1, qp)
+		if err != nil {
+			return admission.Allowed("Badly formed parameters for prometheus MEM Query")
+		}
+		promQmem = buf1.String()
 	}
 
-	admLog.Info("Annotations: ", "prom-url", promUrl, "prom-query", promQcpu)
+	admLog.Info("Requesting: ", "prom-url", promUrl, "prom-query", promQcpu)
 	pr := http.Client{}
 	if promQcpu != "" {
 		promdata, err := pr.Get(fmt.Sprintf("%s/api/v1/query?query=%s", promUrl, url.QueryEscape(promQcpu)))
 		if err != nil {
+			admLog.Error(err, "Can't access prometheus")
 			return admission.Allowed("Can't access prom 110")
 		}
 
@@ -194,7 +299,10 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 							container.Resources.Requests.Cpu().MilliValue(),
 							math.Round(cpu*1000),
 						))
-						pod.Spec.Containers[i].Resources.Requests[v1.ResourceCPU] = resource.MustParse(fmt.Sprintf("%vm", v))
+						if (pod.Spec.Containers[i].Resources.Requests != nil) &&
+							(pod.Spec.Containers[i].Resources.Requests[v1.ResourceCPU] != (resource.Quantity{})) {
+							pod.Spec.Containers[i].Resources.Requests[v1.ResourceCPU] = resource.MustParse(fmt.Sprintf("%vm", v))
+						}
 					}
 				}
 			}
@@ -210,6 +318,8 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 		mem query
 		max(max_over_time(container_memory_working_set_bytes{job="kubelet", metrics_path="/metrics/cadvisor", namespace="fudy-dev", pod=~"v1-0-accounting-service-.*", container!="", image!=""}[120h])) by (container)
 	*/
+	admLog.Info("Requesting: ", "prom-url", promUrl, "prom-query", promQmem)
+
 	if promQmem != "" {
 		promdata, err := pr.Get(fmt.Sprintf("%s/api/v1/query?query=%s", promUrl, url.QueryEscape(promQmem)))
 		if err != nil {
@@ -257,8 +367,14 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 							math.Round(float64(container.Resources.Limits.Memory().Value())/1024/1024),
 							math.Round(float64(mem)*1.5/1024/1024+100),
 						))
-						pod.Spec.Containers[i].Resources.Requests[v1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%vM", mReq))
-						pod.Spec.Containers[i].Resources.Limits[v1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%vM", mLim))
+						if (pod.Spec.Containers[i].Resources.Requests != nil) &&
+							(pod.Spec.Containers[i].Resources.Requests[v1.ResourceMemory] != (resource.Quantity{})) {
+							pod.Spec.Containers[i].Resources.Requests[v1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%vM", mReq))
+						}
+						if (pod.Spec.Containers[i].Resources.Limits != nil) &&
+							(pod.Spec.Containers[i].Resources.Limits[v1.ResourceMemory] != (resource.Quantity{})) {
+							pod.Spec.Containers[i].Resources.Limits[v1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%vM", mLim))
+						}
 					}
 				}
 			}
@@ -311,4 +427,17 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 func (v *PodResourceSaver) InjectDecoder(d *admission.Decoder) error {
 	v.decoder = d
 	return nil
+}
+
+func (v *PodResourceSaver) nsIncluded(nsName string, ctx context.Context) (bool, error) {
+	ns := &v1.Namespace{}
+	if err := v.Client.Get(ctx, types.NamespacedName{Name: nsName}, ns); err != nil {
+		admLog.Error(err, "Failed to get namespace for the pod")
+		return false, err
+	} else {
+		if ns.Labels[ANNOTATION_DOMAIN()+"/default"] == "enable" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
