@@ -1,13 +1,17 @@
 env:
   ANNOTATION_DOMAIN: recut.geek7.io
-  CPU_REQUEST_MIN: "100"
+  CPU_REQUEST_MIN: "10"
   ISTIO_PROXY_CPU_MIN: "5"
   MEMORY_LIMIT_MIN: "1024"
   ISTIO_MEMORY_LIMIT_MIN: "1024"
-  MEMORY_REQUEST_MIN: "128"
-
+  MEMORY_REQUEST_MIN: "64"
+  PROM_URL: "http://vmsingle-vm.monitoring-prod:8429"
+  PROM_CPU_QUERY: 'median by (container) (rate(container_cpu_usage_seconds_total{namespace="{{ .Namespace }}", pod=~"{{ .PodRegexp }}", image!="", container!="POD"}[{{ .Period }}]))'
+  PROM_MEM_QUERY: 'max(max_over_time(container_memory_working_set_bytes{namespace="{{ .Namespace }}", pod=~"{{ .PodRegexp }}", image!="", container!="POD"}[{{ .Period }}])) by (container)'
+  PERIOD: 168h
+  LOG_POD_OBJECT: "no"
 image:
   registry: pzelensky/recut
-  tag: 0.0.5
+  tag: 0.0.6
 
 replicas: 1
