@@ -186,10 +186,10 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 	)
 
 	if pod.OwnerReferences == nil {
-		admLog.Info("No owner reference. Skipping.", "Namespace", pod.Namespace, "Pod", pod.GenerateName)
+		admLog.Info("No owner reference. Skipping.", "Namespace", req.Namespace, "Pod", pod.GenerateName)
 		return admission.Allowed("No owner reference. Skipping.")
 	}
-	admLog.Info("Checking annotations ...", "Namespace", pod.Namespace, "Pod", pod.GenerateName)
+	admLog.Info("Checking annotations ...", "Namespace", req.Namespace, "Pod", pod.GenerateName)
 	if pod.Annotations[ANNOTATION_DOMAIN()+"/prom-url"] != "" {
 		promUrl = pod.Annotations[ANNOTATION_DOMAIN()+"/prom-url"]
 		admLog.Info("prom-url annotaion")
@@ -214,7 +214,7 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 	}
 
 	if (promQmem == "") && (promQcpu == "") {
-		if def, _ := v.nsIncluded(pod.Namespace, ctx); def == false {
+		if def, _ := v.nsIncluded(req.Namespace, ctx); def == false {
 			return admission.Allowed("No " + ANNOTATION_DOMAIN() + "/prom-query and " + ANNOTATION_DOMAIN() + "/mem-prom-query annotations found. Namespace label absent.")
 		}
 		if pod.OwnerReferences[0].Kind == "Job" {
@@ -231,7 +231,7 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 				ReplaceAllString(pod.Name, "$1") + "[0-9]+$"
 		}
 		qp := QueryParams{
-			Namespace: pod.Namespace,
+			Namespace: req.Namespace,
 			PodRegexp: pregexp,
 			Period:    PERIOD(),
 		}
