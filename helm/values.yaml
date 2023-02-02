@@ -12,6 +12,6 @@ env:
   LOG_POD_OBJECT: "no"
 image:
   registry: pzelensky/recut
-  tag: 0.0.6
+  tag: 0.0.7
 
 replicas: 1
