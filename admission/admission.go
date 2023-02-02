@@ -60,8 +60,8 @@ const (
 
 /*
 
-median by (container) (rate(container_cpu_usage_seconds_total{namespace="platform-auth-flow-stable", pod=~"auth-flow-service-[0-9a-z]+-[0-9a-z]+", image!="", container!="POD"}))[120h]
-max(max_over_time(container_memory_working_set_bytes{namespace="platform-auth-flow-stable", pod=~"auth-flow-service-[0-9a-z]+-[0-9a-z]+", image!="", container!="POD"}[12h])) by (container)
+median by (container) (rate(container_cpu_usage_seconds_total{namespace="namespace-stable", pod=~"some-service-[0-9a-z]+-[0-9a-z]+", image!="", container!="POD"}))[120h]
+max(max_over_time(container_memory_working_set_bytes{namespace="namespacew-stable", pod=~"some-service-[0-9a-z]+-[0-9a-z]+", image!="", container!="POD"}[120h])) by (container)
 
 */
 
@@ -314,10 +314,6 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 		}
 	}
 
-	/*
-		mem query
-		max(max_over_time(container_memory_working_set_bytes{job="kubelet", metrics_path="/metrics/cadvisor", namespace="fudy-dev", pod=~"v1-0-accounting-service-.*", container!="", image!=""}[120h])) by (container)
-	*/
 	admLog.Info("Requesting: ", "prom-url", promUrl, "prom-query", promQmem)
 
 	if promQmem != "" {
