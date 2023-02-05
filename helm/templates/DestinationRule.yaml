@@ -1,0 +1,13 @@
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: recut-rule
+spec:
+  host: recut-webhook-service.{{.Release.Namespace}}.svc.cluster.local
+{{/*  workloadSelector:*/}}
+{{/*    matchLabels:*/}}
+{{/*      control-plane: controller-manager*/}}
+{{/*      controller: recut*/}}
+  trafficPolicy:
+    tls:
+      mode: DISABLE
