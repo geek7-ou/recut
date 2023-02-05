@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -16,6 +17,7 @@ import (
 	"regexp"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"strconv"
 	"text/template"
@@ -160,6 +162,30 @@ var (
 			return period
 		}
 	}
+	cpuChange = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "pod_cpu_request_change",
+			Help: "Pod CPU change",
+		},
+		[]string{
+			"namespace",
+			"parent",
+			"container",
+			"advisory",
+		},
+	)
+	memChange = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "pod_mem_request_change",
+			Help: "Pod MEM change",
+		},
+		[]string{
+			"namespace",
+			"parent",
+			"container",
+			"advisory",
+		},
+	)
 )
 
 func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) admission.Response {
@@ -179,11 +205,24 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 		pod.Annotations = map[string]string{}
 	}
 	var (
-		promUrl  string
-		promQcpu string
-		promQmem string
-		pregexp  string
+		promUrl    string
+		promQcpu   string
+		promQmem   string
+		pregexp    string
+		parentName string
 	)
+
+	if pod.OwnerReferences[0].Kind == "ReplicaSet" {
+		parentName = regexp.MustCompile(`^([0-9a-z\-]+)-([0-9a-z]+)-$`).
+			ReplaceAllString(pod.GenerateName, "$1")
+	}
+	if pod.OwnerReferences[0].Kind == "StatefulSet" {
+		parentName = regexp.MustCompile(`^([0-9a-z\-]+)-([0-9]+)$`).
+			ReplaceAllString(pod.Name, "$1")
+	}
+
+	_ = metrics.Registry.Register(cpuChange)
+	_ = metrics.Registry.Register(memChange)
 
 	if pod.OwnerReferences == nil {
 		admLog.Info("No owner reference. Skipping.", "Namespace", req.Namespace, "Pod", pod.GenerateName)
@@ -214,7 +253,7 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 	}
 
 	if (promQmem == "") && (promQcpu == "") {
-		if def, _ := v.nsIncluded(req.Namespace, ctx); def == false {
+		if def, _ := v.nsIncluded(req.Namespace, ctx); def == "false" {
 			return admission.Allowed("No " + ANNOTATION_DOMAIN() + "/prom-query and " + ANNOTATION_DOMAIN() + "/mem-prom-query annotations found. Namespace label absent.")
 		}
 		if pod.OwnerReferences[0].Kind == "Job" {
@@ -286,22 +325,28 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 						case string:
 							cpu, _ = strconv.ParseFloat(cpuExpr, 64)
 						}
-						var v int64
+						var val int64
 						if container.Name != "istio-proxy" {
-							v = int64(math.Round(math.Max(cpu*1000, float64(MIN_CPU_REQUEST()))))
+							val = int64(math.Round(math.Max(cpu*1000, float64(MIN_CPU_REQUEST()))))
 						} else {
-							v = int64(math.Round(math.Max(cpu*1000, float64(MIN_ISTIO_PROXY_CPU_REQUEST()))))
+							val = int64(math.Round(math.Max(cpu*1000, float64(MIN_ISTIO_PROXY_CPU_REQUEST()))))
 						}
 						admLog.Info(fmt.Sprintf(
 							"Setting CPU request for container %s to %v instead of %v (calculated values is %v)",
 							container.Name,
-							v,
+							val,
 							container.Resources.Requests.Cpu().MilliValue(),
 							math.Round(cpu*1000),
 						))
+						cpuChange.With(prometheus.Labels{
+							"namespace": req.Namespace,
+							"parent":    parentName,
+							"container": container.Name,
+							"advisory":  fmt.Sprint(v.isAdvisory(req, ctx)),
+						}).Set(float64(container.Resources.Requests.Cpu().MilliValue() - val))
 						if (pod.Spec.Containers[i].Resources.Requests != nil) &&
 							(pod.Spec.Containers[i].Resources.Requests[v1.ResourceCPU] != (resource.Quantity{})) {
-							pod.Spec.Containers[i].Resources.Requests[v1.ResourceCPU] = resource.MustParse(fmt.Sprintf("%vm", v))
+							pod.Spec.Containers[i].Resources.Requests[v1.ResourceCPU] = resource.MustParse(fmt.Sprintf("%vm", val))
 						}
 					}
 				}
@@ -363,6 +408,13 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 							math.Round(float64(container.Resources.Limits.Memory().Value())/1024/1024),
 							math.Round(float64(mem)*1.5/1024/1024+100),
 						))
+						memChange.With(prometheus.Labels{
+							"namespace": req.Namespace,
+							"parent":    parentName,
+							"container": container.Name,
+							"advisory":  fmt.Sprint(v.isAdvisory(req, ctx)),
+						}).Set(math.Round(float64(container.Resources.Requests.Memory().Value())/1024/1024 - float64(mReq)))
+
 						if (pod.Spec.Containers[i].Resources.Requests != nil) &&
 							(pod.Spec.Containers[i].Resources.Requests[v1.ResourceMemory] != (resource.Quantity{})) {
 							pod.Spec.Containers[i].Resources.Requests[v1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%vM", mReq))
@@ -387,7 +439,11 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 
-	return admission.PatchResponseFromRaw(req.Object.Raw, marshaledPod)
+	if v.isAdvisory(req, ctx) {
+		return admission.Allowed("Advisory mode")
+	} else {
+		return admission.PatchResponseFromRaw(req.Object.Raw, marshaledPod)
+	}
 
 	/*
 		{
@@ -425,15 +481,33 @@ func (v *PodResourceSaver) InjectDecoder(d *admission.Decoder) error {
 	return nil
 }
 
-func (v *PodResourceSaver) nsIncluded(nsName string, ctx context.Context) (bool, error) {
+func (v *PodResourceSaver) nsIncluded(nsName string, ctx context.Context) (string, error) {
 	ns := &v1.Namespace{}
 	if err := v.Client.Get(ctx, types.NamespacedName{Name: nsName}, ns); err != nil {
 		admLog.Error(err, "Failed to get namespace for the pod")
-		return false, err
+		return "false", err
 	} else {
-		if ns.Labels[ANNOTATION_DOMAIN()+"/default"] == "enable" {
-			return true, nil
+		if ns.Labels[ANNOTATION_DOMAIN()+"/default"] == "enable" || ns.Labels[ANNOTATION_DOMAIN()+"/default"] == "advisory" {
+			return ns.Labels[ANNOTATION_DOMAIN()+"/default"], nil
 		}
 	}
-	return false, nil
+	return "false", nil
+}
+func (v *PodResourceSaver) isAdvisory(req admission.Request, ctx context.Context) bool {
+	ns := &v1.Namespace{}
+	if err := v.Client.Get(ctx, types.NamespacedName{Name: req.Namespace}, ns); err != nil {
+		admLog.Error(err, "Failed to get namespace for the pod")
+		return false
+	} else {
+		if ns.Labels[ANNOTATION_DOMAIN()+"/default"] == "advisory" {
+			return true
+		}
+	}
+	pod := &v1.Pod{}
+	_ = json.Unmarshal(req.Object.Raw, pod)
+	if pod.Annotations[ANNOTATION_DOMAIN()+"/mode"] == "advisory" {
+		return true
+	}
+
+	return false
 }
