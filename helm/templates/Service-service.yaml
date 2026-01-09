@@ -13,9 +13,6 @@ spec:
   - port: 443
     protocol: TCP
     targetPort: 9443
-  - port: 8080
-    protocol: TCP
-    targetPort: metrics
   selector:
     control-plane: controller-manager
     controller: recut

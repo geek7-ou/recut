@@ -36,6 +36,8 @@ type QueryParams struct {
 	Period    string
 }
 
+type PodResources map[string]*v1.ResourceRequirements
+
 type PromAnswer struct {
 	Status string `json:"status"`
 	Data   struct {
@@ -211,6 +213,11 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 		pregexp    string
 		parentName string
 	)
+	originalResources := make(PodResources)
+
+	if len(pod.OwnerReferences) == 0 {
+		return admission.Allowed("Won't affect orphan pod")
+	}
 
 	if pod.OwnerReferences[0].Kind == "ReplicaSet" {
 		parentName = regexp.MustCompile(`^([0-9a-z\-]+)-([0-9a-z]+)-$`).
@@ -297,6 +304,7 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 	}
 
 	admLog.Info("Requesting: ", "prom-url", promUrl, "prom-query", promQcpu)
+
 	pr := http.Client{}
 	if promQcpu != "" {
 		promdata, err := pr.Get(fmt.Sprintf("%s/api/v1/query?query=%s", promUrl, url.QueryEscape(promQcpu)))
@@ -344,6 +352,10 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 							"container": container.Name,
 							"advisory":  fmt.Sprint(v.isAdvisory(req, ctx)),
 						}).Set(float64(container.Resources.Requests.Cpu().MilliValue() - val))
+
+						originalResources[container.Name] = new(v1.ResourceRequirements)
+						container.Resources.DeepCopyInto(originalResources[container.Name])
+
 						if (pod.Spec.Containers[i].Resources.Requests != nil) &&
 							(pod.Spec.Containers[i].Resources.Requests[v1.ResourceCPU] != (resource.Quantity{})) {
 							pod.Spec.Containers[i].Resources.Requests[v1.ResourceCPU] = resource.MustParse(fmt.Sprintf("%vm", val))
@@ -390,9 +402,9 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 						var mReq, mLim int64
 						mReq = int64(math.Round(math.Max(float64(mem)/1024/1024, float64(MEMORY_REQUEST_MIN()))))
 						if container.Name != "istio-proxy" {
-							mLim = int64(math.Round(math.Max(float64(mem)*1.5/1024/1024+100, float64(MEMORY_LIMIT_MIN()))))
+							mLim = int64(math.Round(math.Max(float64(mem)*2/1024/1024+100, float64(MEMORY_LIMIT_MIN()))))
 						} else {
-							mLim = int64(math.Round(math.Max(float64(mem)*1.5/1024/1024+100, float64(ISTIO_MEMORY_LIMIT_MIN()))))
+							mLim = int64(math.Round(math.Max(float64(mem)*2/1024/1024+100, float64(ISTIO_MEMORY_LIMIT_MIN()))))
 						}
 						admLog.Info(fmt.Sprintf(
 							"Setting MEM request for container %s to %vM instead of %vM (calculated values is %vM)",
@@ -415,6 +427,11 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 							"advisory":  fmt.Sprint(v.isAdvisory(req, ctx)),
 						}).Set(math.Round(float64(container.Resources.Requests.Memory().Value())/1024/1024 - float64(mReq)))
 
+						if _, ok := originalResources[container.Name]; !ok {
+							originalResources[container.Name] = new(v1.ResourceRequirements)
+							container.Resources.DeepCopyInto(originalResources[container.Name])
+						}
+
 						if (pod.Spec.Containers[i].Resources.Requests != nil) &&
 							(pod.Spec.Containers[i].Resources.Requests[v1.ResourceMemory] != (resource.Quantity{})) {
 							pod.Spec.Containers[i].Resources.Requests[v1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%vM", mReq))
@@ -431,6 +448,9 @@ func (v *PodResourceSaver) Handle(ctx context.Context, req admission.Request) ad
 			admLog.Info(fmt.Sprintf("Error getting %s/api/v1/query?query=%s", promUrl, url.QueryEscape(promQmem)))
 			return admission.Errored(http.StatusInternalServerError, err)
 		}
+	}
+	if tempBuf, err := json.Marshal(originalResources); err == nil {
+		pod.Annotations[ANNOTATION_DOMAIN()+"/resources"] = string(tempBuf)
 	}
 
 	marshaledPod, err := json.Marshal(pod)
